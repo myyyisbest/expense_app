@@ -27,7 +27,8 @@ c.execute('''
         budget_item TEXT,
         employee TEXT,
         amount REAL,
-        description TEXT
+        description TEXT,
+        status TEXT DEFAULT 'pending'
     )
 ''')
 
@@ -36,11 +37,26 @@ c.execute('''
     CREATE TABLE IF NOT EXISTS config (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         key TEXT NOT NULL,
-        code TEXT NOT NULL,
-        description TEXT NOT NULL,
-        sap_code TEXT NOT NULL,
-        sap_description TEXT NOT NULL,
-        UNIQUE(key, code, description)
+        value TEXT NOT NULL,
+        UNIQUE(key, value)
+    )
+''')
+
+# 创建会计凭证表
+c.execute('''
+    CREATE TABLE IF NOT EXISTS account_entries (
+        voucher_number INTEGER PRIMARY KEY,
+        voucher_date DATE,
+        post_date DATE,
+        sap_account TEXT,
+        sap_account_desc TEXT,
+        cost_center TEXT,
+        cost_center_desc TEXT,
+        debit REAL,
+        credit REAL,
+        employee_code TEXT,
+        employee_desc TEXT,
+        expense_id INTEGER
     )
 ''')
 
@@ -48,30 +64,25 @@ c.execute('''
 c.execute('''
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT NOT NULL,
-        user_name TEXT NOT NULL,
-        password TEXT NOT NULL,
-        role TEXT NOT NULL DEFAULT 'user',
-        UNIQUE(user_id)
+        username TEXT UNIQUE,
+        password TEXT,
+        role TEXT
     )
 ''')
 
-# 确保至少有一个管理员用户
-admin_exists = c.execute("SELECT COUNT(*) FROM users WHERE role='admin'").fetchone()[0]
-if admin_exists == 0:
-    c.execute("INSERT OR IGNORE INTO users (user_id, user_name, password, role) VALUES (?, ?, ?, ?)", 
-              ("admin", "管理员", "admin123", "admin"))
-    conn.commit()
+# 初始化默认用户
+c.execute("INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)", ("admin", "admin123", "admin"))
+conn.commit()
 
 # 初始化 session state
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
 
-if 'user_id' not in st.session_state:
-    st.session_state.user_id = ""
+if 'username' not in st.session_state:
+    st.session_state.username = ""
     
-if 'user_role' not in st.session_state:
-    st.session_state.user_role = ""
+if 'role' not in st.session_state:
+    st.session_state.role = ""
     
 if 'current_page' not in st.session_state:
     st.session_state.current_page = "报销采集"
@@ -81,49 +92,28 @@ if not st.session_state.logged_in:
     st.title("🔐 登录系统")
     
     with st.form("login_form"):
-        user_id = st.text_input("用户ID")
+        username = st.text_input("用户名")
         password = st.text_input("密码", type="password")
         submitted = st.form_submit_button("登录")
         
         if submitted:
-            user = c.execute("SELECT user_id, user_name, role FROM users WHERE user_id=? AND password=?", 
-                           (user_id, password)).fetchone()
+            user = c.execute("SELECT username, password, role FROM users WHERE username=? AND password=?", 
+                           (username, password)).fetchone()
             if user:
                 st.session_state.logged_in = True
-                st.session_state.user_id = user[0]
-                st.session_state.user_role = user[2]
-                st.success(f"欢迎回来，{user[1]}！")
+                st.session_state.username = user[0]
+                st.session_state.role = user[2]
+                st.success(f"欢迎回来，{user[0]}！")
                 st.experimental_rerun()
             else:
-                st.error("用户ID或密码错误！")
+                st.error("用户名或密码错误！")
     
     st.info("默认管理员账号: admin / 密码: admin123")
     st.stop()
 
 # 页面选择
 st.sidebar.title("导航")
-st.sidebar.write(f"当前用户: {st.session_state.user_id}")
-
-# 登出按钮
-if st.sidebar.button("登出"):
-    st.session_state.logged_in = False
-    st.session_state.user_id = ""
-    st.session_state.user_role = ""
-    st.experimental_rerun()
-
-# 创建导航按钮
-col1, col2 = st.sidebar.columns([1,1])
-with col1:
-    if st.button("📝 采集"):
-        st.session_state.current_page = "报销采集"
-with col2:
-    if st.button("🔍 查看"):
-        st.session_state.current_page = "报销查看"
-
-# 只有管理员才能看到配置按钮
-if st.session_state.user_role == "admin":
-    if st.sidebar.button("⚙️ 配置"):
-        st.session_state.current_page = "配置管理"
+page = st.sidebar.selectbox("选择页面", ["报销采集", "报销查看", "报销记账", "系统配置"])
 
 # 根据 session state 显示对应页面
 if st.session_state.current_page == "报销采集":
@@ -244,297 +234,154 @@ elif st.session_state.current_page == "报销查看":
             mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         )
 
-elif st.session_state.current_page == "配置管理":
-    st.title("🔧 配置管理")
-    # 配置管理界面
-    # 将配置管理拆分为主数据管理和用户管理
-    main_config_tabs = st.tabs(["主数据管理", "用户管理"]) # 顶级标签页
+elif page == "报销记账":
+    st.title("📝 报销记账")
 
-    with main_config_tabs[0]: # 主数据管理
-        st.subheader("主数据管理")
-        config_tabs = st.tabs(["部门", "公司", "预算科目", "报销人"]) # 主数据下的子标签页
+    # 查询待记账条目
+    pending_df = pd.read_sql_query("SELECT * FROM expenses WHERE status='pending'", conn)
+    
+    if not pending_df.empty:
+        selected_rows = st.data_editor(pending_df, key="pending_expenses", 
+                                    column_config={"selected": st.column_config.CheckboxColumn("选择")})
+        
+        if st.button("生成会计凭证"):
+            selected_ids = selected_rows[selected_rows["selected"]].id.tolist()
+            if selected_ids:
+                @st.dialog("会计凭证录入")
+                def show_voucher_dialog(expense):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        voucher_date = st.date_input("凭证日期")
+                        sap_account = st.text_input("SAP核算科目")
+                    with col2:
+                        post_date = st.date_input("过账日期")
+                        sap_cost_center = st.text_input("SAP成本中心编码")
+                    
+                    # 借方金额自动填充
+                    debit_amount = expense.amount
+                    st.markdown("### 会计分录")
+                    entries = []
+                    
+                    # 借方行
+                    entries.append({
+                        "行标": "借方",
+                        "凭证日期": voucher_date,
+                        "过账日期": post_date,
+                        "SAP核算科目": sap_account,
+                        "SAP核算科目描述": "费用报销",
+                        "SAP成本中心编码": sap_cost_center,
+                        "SAP成本中心描述": "成本中心",
+                        "借方金额": debit_amount,
+                        "贷方金额": 0.0,
+                        "员工编码": expense.employee,
+                        "员工描述": expense.employee
+                    })
+                    
+                    # 贷方行（可添加多行）
+                    if 'credit_entries' not in st.session_state:
+                        st.session_state.credit_entries = []
+                    
+                    for i, entry in enumerate(st.session_state.credit_entries):
+                        cols = st.columns([1, 3, 3, 2, 2, 2, 2, 2, 2])
+                        with cols[0]:
+                            st.write(f"{i+1}. 贷方")
+                        with cols[1]:
+                            entry["SAP核算科目"] = st.text_input(f"科目_{i}", value=entry.get("SAP核算科目", ""))
+                        with cols[2]:
+                            entry["SAP核算科目描述"] = st.text_input(f"科目描述_{i}", value=entry.get("SAP核算科目描述", ""))
+                        with cols[3]:
+                            entry["SAP成本中心编码"] = st.text_input(f"成本中心_{i}", value=entry.get("SAP成本中心编码", ""))
+                        with cols[4]:
+                            entry["SAP成本中心描述"] = st.text_input(f"成本中心描述_{i}", value=entry.get("SAP成本中心描述", ""))
+                        with cols[5]:
+                            entry["借方金额"] = st.number_input(f"借方_{i}", value=0.0, disabled=True)
+                        with cols[6]:
+                            entry["贷方金额"] = st.number_input(f"贷方_{i}", value=entry.get("贷方金额", 0.0))
+                        with cols[7]:
+                            entry["员工编码"] = st.text_input(f"员工编码_{i}", value=entry.get("员工编码", ""))
+                        with cols[8]:
+                            entry["员工描述"] = st.text_input(f"员工描述_{i}", value=entry.get("员工描述", ""))
+                    
+                    # 添加新行按钮
+                    if st.button("➕ 添加行"):
+                        st.session_state.credit_entries.append({})
+                        st.rerun()
+                    
+                    # 合计计算
+                    total_debit = debit_amount
+                    total_credit = sum(e.get("贷方金额", 0) for e in st.session_state.credit_entries)
+                    
+                    cols = st.columns([7, 2, 2])
+                    with cols[0]:
+                        st.markdown("**合计**")
+                    with cols[1]:
+                        st.markdown(f"**￥{total_debit:.2f}**")
+                    with cols[2]:
+                        st.markdown(f"**￥{total_credit:.2f}****")
+                    
+                    if st.button("✅ 保存凭证"):
+                        if abs(total_debit - total_credit) > 0.01:
+                            st.error("借贷不平，请检查！")
+                        else:
+                            # 获取当前最大凭证号
+                            c.execute("SELECT MAX(voucher_number) FROM account_entries")
+                            max_voucher = c.fetchone()[0] or 10000000
+                            
+                            # 保存会计分录
+                            for entry in entries + st.session_state.credit_entries:
+                                c.execute('''
+                                    INSERT INTO account_entries (
+                                        voucher_number, voucher_date, post_date, 
+                                        sap_account, sap_account_desc,
+                                        cost_center, cost_center_desc,
+                                        debit, credit, employee_code, employee_desc, expense_id
+                                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                ''', (
+                                    max_voucher + 1,
+                                    voucher_date, post_date,
+                                    sap_account, "费用报销",
+                                    sap_cost_center, "成本中心",
+                                    debit_amount, 0.0,
+                                    expense.employee, expense.employee,
+                                    expense.id
+                                ))
+                            
+                            # 更新费用记录状态
+                            c.execute(f"UPDATE expenses SET status='posted' WHERE id IN ({','.join(map(str, selected_ids))})")
+                            conn.commit()
+                            st.success(f"凭证 {max_voucher + 1} 已生成！")
+                            st.session_state.credit_entries = []
+                            st.rerun()
+                
+                # 显示对话框
+                for idx, row in pending_df.iterrows():
+                    if row.id in selected_ids:
+                        show_voucher_dialog(row)
+            else:
+                st.warning("请先选择要记账的条目")
+    else:
+        st.info("暂无待记账条目")
 
-    with config_tabs[0]:
-        st.subheader("部门管理")
-        # 手动添加部分
-        col1, col2 = st.columns(2)
-        with col1:
-            code = st.text_input("部门编码")
-            sap_code = st.text_input("SAP成本中心", value=code)
-        with col2:
-            desc = st.text_input("部门描述")
-            sap_desc = st.text_input("SAP成本中心描述", value=desc)
-        if st.button("添加部门") and code and desc:
-            try:
-                c.execute("INSERT OR IGNORE INTO config (key, code, description, sap_code, sap_description) VALUES (?, ?, ?, ?, ?)", 
-                        ("department", code, desc, sap_code, sap_desc))
-                conn.commit()
-                st.success(f"部门 '{desc}({code})' 已添加！")
-            except sqlite3.IntegrityError:
-                st.warning(f"部门编码 {code} 或描述 {desc} 已存在！")
-        
-        # Excel导入部分
-        st.divider()
-        st.subheader("批量导入")
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            uploaded_file = st.file_uploader("上传Excel文件", type=["xlsx"], key="department_uploader")
-        with col2:
-            dept_template = create_excel_template(["部门编码", "部门描述", "SAP成本中心", "SAP成本中心描述"])
-            st.download_button(
-                label="📥 下载模板",
-                data=dept_template,
-                file_name="部门导入模板.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        if uploaded_file is not None:
-            try:
-                df = pd.read_excel(uploaded_file)
-                if all(col in df.columns for col in ["部门编码", "部门描述", "SAP成本中心", "SAP成本中心描述"]):
-                    for _, row in df.iterrows():
-                        try:
-                            c.execute("INSERT OR IGNORE INTO config (key, code, description, sap_code, sap_description) VALUES (?, ?, ?, ?, ?)",
-                                    ("department", row["部门编码"], row["部门描述"], row["SAP成本中心"], row["SAP成本中心描述"]))
-                        except sqlite3.IntegrityError:
-                            continue
-                    conn.commit()
-                    st.success("Excel数据导入成功！")
-                else:
-                    st.error("Excel文件格式不正确！请确保包含：部门编码、部门描述、SAP成本中心、SAP成本中心描述")
-            except Exception as e:
-                st.error(f"导入失败：{str(e)}")
-        
-        # 显示部门列表
-        st.divider()
-        st.subheader("部门列表")
-        dept_df = pd.read_sql_query("SELECT code AS 编码, description AS 描述, sap_code AS 'SAP成本中心', sap_description AS 'SAP成本中心描述' FROM config WHERE key='department' ORDER BY code", conn)
-        st.dataframe(dept_df)
+elif page == "系统配置":
+    st.title("🔧 系统配置")
 
-    with config_tabs[1]:
-        st.subheader("公司管理")
-        # 手动添加部分
-        col1, col2 = st.columns(2)
-        with col1:
-            code = st.text_input("公司编码")
-            sap_code = st.text_input("SAP公司代码", value=code)
-        with col2:
-            desc = st.text_input("公司描述")
-            sap_desc = st.text_input("SAP公司描述", value=desc)
-        if st.button("添加公司") and code and desc:
-            try:
-                c.execute("INSERT OR IGNORE INTO config (key, code, description, sap_code, sap_description) VALUES (?, ?, ?, ?, ?)", 
-                        ("company", code, desc, sap_code, sap_desc))
-                conn.commit()
-                st.success(f"公司 '{desc}({code})' 已添加！")
-            except sqlite3.IntegrityError:
-                st.warning(f"公司编码 {code} 或描述 {desc} 已存在！")
-        
-        # Excel导入部分
-        st.divider()
-        st.subheader("批量导入")
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            uploaded_file = st.file_uploader("上传Excel文件", type=["xlsx"], key="company_uploader")
-        with col2:
-            comp_template = create_excel_template(["公司编码", "公司描述", "SAP公司代码", "SAP公司描述"])
-            st.download_button(
-                label="📥 下载模板",
-                data=comp_template,
-                file_name="公司导入模板.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        if uploaded_file is not None:
-            try:
-                df = pd.read_excel(uploaded_file)
-                if all(col in df.columns for col in ["公司编码", "公司描述", "SAP公司代码", "SAP公司描述"]):
-                    for _, row in df.iterrows():
-                        try:
-                            c.execute("INSERT OR IGNORE INTO config (key, code, description, sap_code, sap_description) VALUES (?, ?, ?, ?, ?)",
-                                    ("company", row["公司编码"], row["公司描述"], row["SAP公司代码"], row["SAP公司描述"]))
-                        except sqlite3.IntegrityError:
-                            continue
-                    conn.commit()
-                    st.success("Excel数据导入成功！")
-                else:
-                    st.error("Excel文件格式不正确！请确保包含：公司编码、公司描述、SAP公司代码、SAP公司描述")
-            except Exception as e:
-                st.error(f"导入失败：{str(e)}")
-        
-        # 显示公司列表
-        st.divider()
-        st.subheader("公司列表")
-        comp_df = pd.read_sql_query("SELECT code AS 编码, description AS 描述, sap_code AS 'SAP公司代码', sap_description AS 'SAP公司描述' FROM config WHERE key='company' ORDER BY code", conn)
-        st.dataframe(comp_df)
-
-    with config_tabs[2]:
-        st.subheader("预算科目管理")
-        # 手动添加部分
-        col1, col2 = st.columns(2)
-        with col1:
-            code = st.text_input("预算科目编码")
-            sap_code = st.text_input("SAP核算科目", value=code)
-        with col2:
-            desc = st.text_input("预算科目描述")
-            sap_desc = st.text_input("SAP核算科目描述", value=desc)
-        if st.button("添加预算科目") and code and desc:
-            try:
-                c.execute("INSERT OR IGNORE INTO config (key, code, description, sap_code, sap_description) VALUES (?, ?, ?, ?, ?)", 
-                        ("budget_item", code, desc, sap_code, sap_desc))
-                conn.commit()
-                st.success(f"预算科目 '{desc}({code})' 已添加！")
-            except sqlite3.IntegrityError:
-                st.warning(f"预算科目编码 {code} 或描述 {desc} 已存在！")
-        
-        # Excel导入部分
-        st.divider()
-        st.subheader("批量导入")
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            uploaded_file = st.file_uploader("上传Excel文件", type=["xlsx"], key="budget_uploader")
-        with col2:
-            budget_template = create_excel_template(["预算科目编码", "预算科目描述", "SAP核算科目", "SAP核算科目描述"])
-            st.download_button(
-                label="📥 下载模板",
-                data=budget_template,
-                file_name="预算科目导入模板.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        if uploaded_file is not None:
-            try:
-                df = pd.read_excel(uploaded_file)
-                if all(col in df.columns for col in ["预算科目编码", "预算科目描述", "SAP核算科目", "SAP核算科目描述"]):
-                    for _, row in df.iterrows():
-                        try:
-                            c.execute("INSERT OR IGNORE INTO config (key, code, description, sap_code, sap_description) VALUES (?, ?, ?, ?, ?)",
-                                    ("budget_item", row["预算科目编码"], row["预算科目描述"], row["SAP核算科目"], row["SAP核算科目描述"]))
-                        except sqlite3.IntegrityError:
-                            continue
-                    conn.commit()
-                    st.success("Excel数据导入成功！")
-                else:
-                    st.error("Excel文件格式不正确！请确保包含：预算科目编码、预算科目描述、SAP核算科目、SAP核算科目描述")
-            except Exception as e:
-                st.error(f"导入失败：{str(e)}")
-        
-        # 显示预算科目列表
-        st.divider()
-        st.subheader("预算科目列表")
-        budget_df = pd.read_sql_query("SELECT code AS 编码, description AS 描述, sap_code AS 'SAP核算科目', sap_description AS 'SAP核算科目描述' FROM config WHERE key='budget_item' ORDER BY code", conn)
-        st.dataframe(budget_df)
-
-    with config_tabs[3]:
-        st.subheader("报销人管理") # 之前的员工管理改为报销人管理，与前面统一
-        # 手动添加部分
-        col1, col2 = st.columns(2)
-        with col1:
-            code = st.text_input("报销人编码")
-            sap_code = st.text_input("SAP员工代码", value=code) # 统一为SAP员工代码
-        with col2:
-            desc = st.text_input("报销人姓名")
-            sap_desc = st.text_input("SAP员工姓名", value=desc) # 统一为SAP员工姓名
-        if st.button("添加报销人") and code and desc: # 按钮文字统一
-            try:
-                c.execute("INSERT OR IGNORE INTO config (key, code, description, sap_code, sap_description) VALUES (?, ?, ?, ?, ?)", 
-                        ("employee", code, desc, sap_code, sap_desc))
-                conn.commit()
-                st.success(f"报销人 '{desc}({code})' 已添加！")
-            except sqlite3.IntegrityError:
-                st.warning(f"报销人编码 {code} 或描述 {desc} 已存在！")
-        
-        # Excel导入部分
-        st.divider()
-        st.subheader("批量导入")
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            uploaded_file = st.file_uploader("上传Excel文件", type=["xlsx"], key="employee_uploader")
-        with col2:
-            emp_template = create_excel_template(["报销人编码", "报销人姓名", "SAP员工代码", "SAP员工姓名"])
-            st.download_button(
-                label="📥 下载模板",
-                data=emp_template,
-                file_name="报销人导入模板.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        if uploaded_file is not None:
-            try:
-                df = pd.read_excel(uploaded_file)
-                if all(col in df.columns for col in ["报销人编码", "报销人姓名", "SAP员工代码", "SAP员工姓名"]):
-                    for _, row in df.iterrows():
-                        try:
-                            c.execute("INSERT OR IGNORE INTO config (key, code, description, sap_code, sap_description) VALUES (?, ?, ?, ?, ?)",
-                                    ("employee", row["报销人编码"], row["报销人姓名"], row["SAP员工代码"], row["SAP员工姓名"]))
-                        except sqlite3.IntegrityError:
-                            continue
-                    conn.commit()
-                    st.success("Excel数据导入成功！")
-                else:
-                    st.error("Excel文件格式不正确！请确保包含：报销人编码、报销人姓名、SAP员工代码、SAP员工姓名")
-            except Exception as e:
-                st.error(f"导入失败：{str(e)}")
-        
-        # 显示报销人列表
-        st.divider()
-        st.subheader("报销人列表")
-        emp_df = pd.read_sql_query("SELECT code AS 编码, description AS 姓名, sap_code AS 'SAP员工代码', sap_description AS 'SAP员工姓名' FROM config WHERE key='employee' ORDER BY code", conn)
-        st.dataframe(emp_df)
-
-    with main_config_tabs[1]: # 用户管理
+    config_tabs = st.tabs(["部门", "公司", "预算科目", "报销人", "用户管理"])
+    
+    with config_tabs[4]:
         st.subheader("用户管理")
-        # 手动添加用户部分
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
         with col1:
-            new_user_id = st.text_input("用户ID (用户管理)") # 增加key防止冲突
+            username = st.text_input("用户名")
+            password = st.text_input("密码", type="password")
         with col2:
-            new_user_name = st.text_input("用户姓名 (用户管理)")
-        with col3:
-            new_user_password = st.text_input("密码 (用户管理)", type="password")
-        new_user_role = st.selectbox("用户角色 (用户管理)", ["user", "admin"], key="user_role_select")
-        if st.button("添加用户") and new_user_id and new_user_name and new_user_password:
+            role = st.selectbox("角色", ["admin", "accountant", "user"])
+            module_access = st.multiselect("模块权限", ["报销采集", "报销查看", "报销记账"])
+            
+        if st.button("添加用户") and username and password:
             try:
-                c.execute("INSERT OR IGNORE INTO users (user_id, user_name, password, role) VALUES (?, ?, ?, ?)", 
-                        (new_user_id, new_user_name, new_user_password, new_user_role))
+                c.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)", 
+                          (username, password, ','.join(module_access)))
                 conn.commit()
-                st.success(f"用户 '{new_user_name}({new_user_id})' 已添加！")
+                st.success(f"用户 {username} 已添加！")
             except sqlite3.IntegrityError:
-                st.warning(f"用户ID {new_user_id} 已存在！")
-
-        # Excel导入用户部分
-        st.divider()
-        st.subheader("批量导入用户")
-        col1_user_import, col2_user_import = st.columns([3, 1])
-        with col1_user_import:
-            user_uploaded_file = st.file_uploader("上传用户Excel文件", type=["xlsx"], key="user_uploader")
-        with col2_user_import:
-            user_template = create_excel_template(["用户ID", "用户姓名", "密码", "角色"])
-            st.download_button(
-                label="📥 下载用户模板",
-                data=user_template,
-                file_name="用户导入模板.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="user_template_download"
-            )
-        if user_uploaded_file is not None:
-            try:
-                user_df_import = pd.read_excel(user_uploaded_file)
-                if all(col in user_df_import.columns for col in ["用户ID", "用户姓名", "密码", "角色"]):
-                    for _, row in user_df_import.iterrows():
-                        try:
-                            c.execute("INSERT OR IGNORE INTO users (user_id, user_name, password, role) VALUES (?, ?, ?, ?)",
-                                    (row["用户ID"], row["用户姓名"], row["密码"], row["角色"]))
-                        except sqlite3.IntegrityError:
-                            continue
-                    conn.commit()
-                    st.success("用户Excel数据导入成功！")
-                else:
-                    st.error("用户Excel文件格式不正确！请确保包含：用户ID、用户姓名、密码、角色")
-            except Exception as e:
-                st.error(f"用户导入失败：{str(e)}")
-
-        # 显示用户列表
-        st.divider()
-        st.subheader("用户列表")
-        users_df = pd.read_sql_query("SELECT user_id AS 用户ID, user_name AS 用户姓名, role AS 角色 FROM users ORDER BY user_id", conn)
-        st.dataframe(users_df)
-
-    # 已将用户管理功能移至顶层标签页，此处无需重复代码
-    # 原有的显示整个config表的部分已注释，因为数据已在各自的tab中显示
+                st.warning(f"用户名 {username} 已存在！")
