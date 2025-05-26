@@ -48,10 +48,36 @@ pip install -r requirements.txt
 python -m alembic upgrade head
 ```
 
-6. 运行应用
+6. 初始化示例数据
+```bash
+python scripts/init_data.py
+```
+
+7. 运行应用
 ```bash
 streamlit run app.py
 ```
+
+## 示例数据
+
+系统预置了以下示例数据：
+
+### 测试账号
+- 管理员：admin / admin123
+- 部门经理：manager1 / manager123
+- 普通员工：employee1 / employee123
+- 财务人员：finance1 / finance123
+
+### 主数据
+- 部门：财务部、人事部、IT部、市场部、销售部
+- 公司：总公司、分公司A、分公司B
+- 预算科目：差旅费、办公用品、业务招待费、培训费、通讯费
+- 员工：张三、李四、王五、赵六、钱七
+
+### 示例报销记录
+- 差旅费报销：1000元
+- 办公用品：500元
+- 业务招待：2000元
 
 ## 项目结构
 
@@ -64,6 +90,10 @@ expense_app/
 │   ├── utils/             # 工具函数
 │   └── static/            # 静态文件
 ├── config/                # 配置文件
+├── docs/                  # 文档
+│   └── architecture.md    # 架构设计文档
+├── scripts/               # 脚本文件
+│   └── init_data.py      # 示例数据初始化
 ├── tests/                 # 测试文件
 ├── migrations/            # 数据库迁移
 ├── logs/                  # 日志文件
