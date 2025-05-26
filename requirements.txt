@@ -1,0 +1,11 @@
+streamlit==1.24.0
+pandas==1.5.3
+python-dotenv==1.0.0
+bcrypt==4.0.1
+PyJWT==2.8.0
+SQLAlchemy==2.0.23
+alembic==1.12.1
+pytest==7.4.3
+black==23.11.0
+flake8==6.1.0
+mypy==1.7.1 
